@@ -29,8 +29,16 @@ class Robot_6_Dof:
         self.att_position_max = 0.0
         self.att_Rx = 0.0
         self.att_Rz = 0.0
+
+        self.theta1 = 0
+        self.theta2 = np.pi/2
+        self.theta3 = 0
+        self.theta4 = 0
+        self.theta5 = 0
+        self.theta6 = 0
+
         # Giới hạn tốc độ cho 5 khớp đầu
-        self.joint_vel_limit = np.pi / 20.0
+        self.joint_vel_limit = np.pi / 10.0
         # Góc khởi tạo cho robot 6 bậc
         initial_joint_angles = [0, np.pi / 2, 0, 0, 0, 0]
         for i, angle in enumerate(initial_joint_angles):
@@ -51,7 +59,6 @@ class Robot_6_Dof:
             self.marker_radii.append(radius) # Lưu bán kính
         # =======================================
 
-        self.jointpos = []
         self.marker_points = []
     # ------------------ Hàm xử lý robot ------------------ #
 
@@ -71,39 +78,50 @@ class Robot_6_Dof:
                     [0, 0, 0, 1]
                 )
 
-    def take_joint_position(self):
+    def take_joint_position(self, client_socket):
         """Lấy vector góc khớp hiện tại của robot 6 bậc."""
-        positions = []
-        for i in range(6):
-            joint_value = p.getJointState(self.robot_id, i)[0]
-            if i == 4:
-                joint_value = -joint_value  # đổi dấu nếu là khớp số 4
-            positions.append(joint_value)
+        if client_socket is not None:
+            data_1 = client_socket.recv(1024).decode()
+            data_1 = data_1[:-1]
+            numbers_list_1 = [float(num) for num in data_1.split(':')]
+            t_1 = numbers_list_1[0]
+            t_2 = numbers_list_1[1]
+            t_3 = numbers_list_1[2]
+            t_4 = numbers_list_1[3]
+            t_5 = numbers_list_1[4]
+            t_6 = numbers_list_1[5]
+            positions = [t_1, t_2, t_3, t_4, t_5, t_6]
+            self.theta1 = t_1
+            self.theta2 = t_2
+            self.theta3 = t_3   
+            self.theta4 = t_4
+            self.theta5 = t_5
+            self.theta6 = t_6
+        else:
+            positions = [self.theta1, self.theta2, self.theta3, self.theta4, self.theta5, self.theta6]
+
         return np.array(positions)
 
-    def take_joint_velocity(self): 
-        """Lấy vector vận tốc góc khớp hiện tại của robot 6 bậc."""
-        velocity = []
-        for i in range(6):
-            joint_value = p.getJointState(self.robot_id, i)[1]
-            if i == 4:
-                joint_value = -joint_value  # đổi dấu nếu là khớp số 4
-            velocity.append(joint_value)
-        return np.array(velocity)
+    def set_joint_velocity(self, theta_v_sixdof, client_socket):
+        if client_socket is not None:
+            v1 = theta_v_sixdof[0]
+            v2 = theta_v_sixdof[1]
+            v3 = theta_v_sixdof[2]
+            v4 = theta_v_sixdof[3]
+            v5 = theta_v_sixdof[4]
+            v6 = theta_v_sixdof[5]
+            data_send_1 = str(v1) + ":" + str(v2) + ":" + str(v3) + ":" + str(v4) + ":" + str(v5) + ":" + str(v6)
+            client_socket.send(data_send_1.encode())
+        else: 
+            self.theta1 = self.theta1 + theta_v_sixdof[0]*0.01
+            self.theta2 = self.theta2 + theta_v_sixdof[1]*0.01  
+            self.theta3 = self.theta3 + theta_v_sixdof[2]*0.01
+            self.theta4 = self.theta4 + theta_v_sixdof[3]*0.01
+            self.theta5 = self.theta5 + theta_v_sixdof[4]*0.01
+            self.theta6 = self.theta6 + theta_v_sixdof[5]*0.01
 
-    def set_joint_velocity(self, theta_v_sixdof):
-        """Set vận tốc cho từng khớp robot 6 bậc."""
-        for i in range(6):
-            velocity = -theta_v_sixdof[i] if i == 4 else theta_v_sixdof[i]
-            p.setJointMotorControl2(
-                self.robot_id,
-                i,
-                controlMode=p.VELOCITY_CONTROL,
-                targetVelocity=velocity,
-                force=500
-            )
 
-    def get_theta_dot(self, x_target, y_target, z_target, vmax, joint_position_local):
+    def get_theta_dot(self, x_target, y_target, z_target,v_target, Rx_target, Rz_target, vmax, joint_position_local):
         """
         Tính theta_dot dựa trên:
         - lỗi vị trí end-effector so với (x_target, y_target, z_target)
@@ -113,6 +131,7 @@ class Robot_6_Dof:
         - vmax: vận tốc tối đa ở không gian task (m/s)
         Trả về: theta_dot (vận tốc khớp), norm lỗi vị trí, lỗi Rx, lỗi Rz
                 """
+        K_1 = 10
         t1, t2, t3, t4, t5, t6 = joint_position_local
         # Jacobian tại tool
         Jtool_sixdof = Jtool_sixdof_function(t1, t2, t3, t4, t5, t6)
@@ -121,22 +140,19 @@ class Robot_6_Dof:
         goal = np.array([float(x_target), float(y_target), float(z_target)]) # Base position
         
         observer_data = Robot6_observer(t1, t2, t3, t4, t5)
-
-        self.jointpos = Coordinate_sixdof(t1, t2, t3, t4, t5)
         self.marker_points = np.array([data[0] for data in observer_data]) + self.base_position
         # Lấy vị trí tool từ PyBullet
         pos = p.getLinkState(bodyUniqueId=self.robot_id, linkIndex=self.tool_link_index)[0]
         x, y, z = pos
         att_sixdof = np.array([x, y, z]) - goal
 
-        # Lưu khoảng cách lớn nhất để chuẩn hóa việc tăng/giảm tốc
-        if not self.flag_take_longest_distance:
-            self.att_position_max = np.linalg.norm(att_sixdof)
-            self.flag_take_longest_distance = True
+        v_att_tool_position_sixdof = - K_1*(att_sixdof) + v_target 
+        v_att_tool_position_sixdof = np.clip(v_att_tool_position_sixdof, -vmax, vmax)
+
 
         # Hướng mong muốn cho Rx, Rz (ở đây đặt = 0)
-        Rx_des = 0.0
-        Rz_des = 0.0
+        Rx_des = float(Rx_target)
+        Rz_des = float(Rz_target)
         t4_des = 0
         Rx_now = t2 + t3 + t5
         Rz_now = -t1 + t6
@@ -146,23 +162,12 @@ class Robot_6_Dof:
         theta_v_t4 = -np.pi/20*np.sign(att_t4)
         if abs(att_t4) < 1e-3:
             theta_v_t4 = 0
-        # Tính phần trăm quãng đường đã đi để điều chỉnh vận tốc
-        percent = 1.0 - np.linalg.norm(att_sixdof) / max(self.att_position_max, 1e-6)
 
-        if percent <= 0.1:
-            v_position_sixdof = max(vmax * percent / 0.1, vmax * 0.5)
-        elif percent < 0.9:
-            v_position_sixdof = vmax
-        else:
-            v_position_sixdof = vmax * (1.0 - percent) / 0.1
-
-        # Vận tốc hấp dẫn theo vị trí
-        v_att_tool_position = -v_position_sixdof * (att_sixdof / np.linalg.norm(att_sixdof))
-        # Vận tốc hấp dẫn theo orientation
+         # Vận tốc hấp dẫn theo orientation
         v_att_tool_orientation = -50.0 * np.array([self.att_Rx, self.att_Rz])
 
         # Vector tốc độ mong muốn ở không gian task
-        c_tool = np.hstack((v_att_tool_position, v_att_tool_orientation))
+        c_tool = np.hstack((v_att_tool_position_sixdof , v_att_tool_orientation))
 
         # Tính tốc độ khớp bằng pseudo-inverse Jacobian
         theta_v_sixdof = np.dot(np.linalg.pinv(Jtool_sixdof), c_tool.T)
@@ -181,3 +186,19 @@ class Robot_6_Dof:
         ])
 
         return theta_dot, np.linalg.norm(att_sixdof), self.att_Rx, self.att_Rz
+    
+    def Update_visualization(self):
+        p.resetJointState(self.robot_id, 0, targetValue=self.theta1)
+        p.resetJointState(self.robot_id, 1, targetValue=self.theta2)
+        p.resetJointState(self.robot_id, 2, targetValue=self.theta3)
+        p.resetJointState(self.robot_id, 3, targetValue=self.theta4)
+        p.resetJointState(self.robot_id, 4, targetValue= -self.theta5)
+        p.resetJointState(self.robot_id, 5, targetValue=self.theta6)    
+
+        # for i in range(6):
+        #     joint_value = p.getJointState(self.robot_id, i)[0]
+        #     if i == 4:
+        #         joint_value = -joint_value  # đổi dấu nếu là khớp số 4
+        #     positions.append(joint_value)
+
+        ## Vì trục 5 bị ngược nên cả khi đẩy vị trí sang thì chỉnh lại dấu

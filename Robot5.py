@@ -22,6 +22,12 @@ class Robot_5_Dof:
         self.att_Rx = 0.0
         self.att_Rz = 0.0
 
+        self.theta1 = 0
+        self.theta2 = np.pi/2
+        self.theta3 = -np.pi/2
+        self.theta4 = 0
+        self.theta5 = 0
+
         # Góc khởi tạo cho robot 6 bậc
         initial_joint_angles = [0, np.pi / 2, -np.pi/2, np.pi/2, 0]
         for i, angle in enumerate(initial_joint_angles):
@@ -208,25 +214,43 @@ class Robot_5_Dof:
                 if sph_b_idx < len(self.capsule_cylinders) and self.capsule_cylinders[sph_b_idx] is not None:
                     p.resetBasePositionAndOrientation(self.capsule_cylinders[sph_b_idx], b.tolist(), [0, 0, 0, 1])
 
-    def take_joint_position(self):
+    def take_joint_position(self, client_socket):
         """Lấy vector góc khớp hiện tại của robot 5 bậc."""
-        positions = []
-        for i in range(5):
-            joint_value = p.getJointState(self.robot_id, i)[0]
-            positions.append(joint_value)
+        if client_socket is not None:
+            data_1 = client_socket.recv(1024).decode()
+            data_1 = data_1[:-1]
+            numbers_list_1 = [float(num) for num in data_1.split(':')]
+            t_1 = numbers_list_1[0]
+            t_2 = numbers_list_1[1]
+            t_3 = numbers_list_1[2]
+            t_4 = numbers_list_1[3]
+            t_5 = numbers_list_1[4]
+            positions = [t_1, t_2, t_3, t_4, t_5]
+            self.theta1 = t_1
+            self.theta2 = t_2
+            self.theta3 = t_3   
+            self.theta4 = t_4
+            self.theta5 = t_5
+        else:
+            positions = [self.theta1, self.theta2, self.theta3, self.theta4, self.theta5]
+
         return np.array(positions)
 
-    def set_joint_velocity(self, theta_v_sixdof):
-        """Set vận tốc cho từng khớp robot 6 bậc."""
-        for i in range(5):
-            velocity = theta_v_sixdof[i]
-            p.setJointMotorControl2(
-                self.robot_id,
-                i,
-                controlMode=p.VELOCITY_CONTROL,
-                targetVelocity=velocity,
-                force=500
-            )
+    def set_joint_velocity(self, theta_v_sixdof, client_socket):
+        if client_socket is not None:
+            v1 = theta_v_sixdof[0]
+            v2 = theta_v_sixdof[1]
+            v3 = theta_v_sixdof[2]
+            v4 = theta_v_sixdof[3]
+            v5 = theta_v_sixdof[4]
+            data_send_1 = str(v1) + ":" + str(v2) + ":" + str(v3) + ":" + str(v4) + ":" + str(v5)
+            client_socket.send(data_send_1.encode())
+        else: 
+            self.theta1 = self.theta1 + theta_v_sixdof[0]*0.01
+            self.theta2 = self.theta2 + theta_v_sixdof[1]*0.01  
+            self.theta3 = self.theta3 + theta_v_sixdof[2]*0.01
+            self.theta4 = self.theta4 + theta_v_sixdof[3]*0.01
+            self.theta5 = self.theta5 + theta_v_sixdof[4]*0.01
     
     def calculate_capsule_distance(self):
         """
@@ -338,22 +362,19 @@ class Robot_5_Dof:
 
         return min_surface_dist, best
      
-    def get_theta_dot(self, x_target, y_target, z_target, vmax, joint_position_local):
+    def get_theta_dot(self, x_target, y_target, z_target, v_target, Rx_target, Rz_target, vmax, joint_position_local):
         """
         Tính theta_dot dựa trên:
         - lỗi vị trí end-effector so với (x_target, y_target, z_target)
         - lỗi orientation Rx, Rz
         """
+        K_1 = 10.0  # Hệ số điều khiển vị trí
         t1, t2, t3, t4, t5 = joint_position_local
-    
-        # Lấy các điểm observer và bán kính của chúng
-        observer_data = Robot5_observer(t1, t2, t3, t4)
         # Jacobian tại tool
         Jtool_fivedof = Jtool_fanuc_function(t1, t2, t3, t4)
-        # Lưu chỉ tọa độ điểm cho marker_points
-        self.marker_points = np.array([data[0] for data in observer_data]) + self.base_position
-        self.capsule_points = Robot5_capsuls(t1, t2, t3, t4) + self.base_position
 
+        observer_data = Robot5_observer(t1, t2, t3, t4)
+        self.marker_points = np.array([data[0] for data in observer_data]) + self.base_position
         # Tọa độ đích (goal)
         goal = np.array([float(x_target), float(y_target), float(z_target)])
 
@@ -362,37 +383,24 @@ class Robot_5_Dof:
         x, y, z = pos
         att = np.array([x, y, z]) - goal
 
-        # Lưu khoảng cách lớn nhất để chuẩn hóa việc tăng/giảm tốc
-        if not self.flag_take_longest_distance:
-            self.att_position_max = np.linalg.norm(att)
-            self.flag_take_longest_distance = True
+        v_att_tool_position_sixdof = - K_1*(att) + v_target 
+        v_att_tool_position_sixdof = np.clip(v_att_tool_position_sixdof, -vmax, vmax)
+
 
         # Hướng mong muốn cho Rx, Rz (ở đây đặt = 0)
-        Rx_des = 0.0
-        Rz_des = 0.0
+        Rx_des = float(Rx_target)
+        Rz_des = float(Rz_target)
 
         Rx_now = t2 + t3 + t4
         Rz_now = -t1 + t5
         self.att_Rx = Rx_now - Rx_des
         self.att_Rz = Rz_now - Rz_des
 
-        # Tính phần trăm quãng đường đã đi để điều chỉnh vận tốc
-        percent = 1.0 - np.linalg.norm(att) / max(self.att_position_max, 1e-6)
-
-        if percent <= 0.1:
-            v_position_sixdof = max(vmax * percent / 0.1, vmax * 0.5)
-        elif percent < 0.9:
-            v_position_sixdof = vmax
-        else:
-            v_position_sixdof = vmax * (1.0 - percent) / 0.1
-
-        # Vận tốc hấp dẫn theo vị trí
-        v_att_tool_position = -v_position_sixdof * (att / np.linalg.norm(att))
         # Vận tốc hấp dẫn theo orientation
         v_att_tool_orientation = -50.0 * np.array([self.att_Rx, self.att_Rz])
 
         # Vector tốc độ mong muốn ở không gian task
-        c_tool = np.hstack((v_att_tool_position, v_att_tool_orientation))
+        c_tool = np.hstack((v_att_tool_position_sixdof , v_att_tool_orientation))
 
         # Tính tốc độ khớp bằng pseudo-inverse Jacobian
         theta_v_sixdof = np.dot(np.linalg.pinv(Jtool_fivedof), c_tool.T)
@@ -513,6 +521,16 @@ class Robot_5_Dof:
 
         return np.array(d_list, dtype=np.float32), np.array(c1_list, dtype=np.float32), np.array(c2_list, dtype=np.float32)
     
+    def Update_visualization(self):
+        for i in range(5):
+            p.resetJointState(self.robot_id, i, targetValue=[
+                self.theta1,
+                self.theta2,
+                self.theta3,
+                self.theta4,
+                self.theta5
+            ][i])
+            
 if __name__ == "__main__":
     # Test robot 5 dof
     physicsClient = p.connect(p.GUI)
